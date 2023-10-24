@@ -250,4 +250,9 @@ bin/mia-result/
 data/
 *.nii.gz
 *.mha
+*.sh
+*.err
+*.out
+*.zip
+*.png
 exercise/randomforest_plots/

@@ -176,7 +176,7 @@ def pre_process(id_: str, paths: dict, **kwargs) -> structure.BrainImage:
         (structure.BrainImage):
     """
 
-    print('-' * 10, 'Processing', id_)
+    print('-' * 10, 'Processing', id_, )
 
     # load image
     path = paths.pop(id_, '')  # the value with key id_ is the root directory of the image
@@ -196,6 +196,9 @@ def pre_process(id_: str, paths: dict, **kwargs) -> structure.BrainImage:
     # execute pipeline on the brain mask image
     img.images[structure.BrainImageTypes.BrainMask] = pipeline_brain_mask.execute(
         img.images[structure.BrainImageTypes.BrainMask])
+    
+    # save the registered brain mask
+    # sitk.WriteImage(img.images[structure.BrainImageTypes.BrainMask], os.path.join(img.path, 'brain_mask.nii.gz'))
 
     # construct pipeline for T1w image pre-processing
     pipeline_t1 = fltr.FilterPipeline()
@@ -213,6 +216,9 @@ def pre_process(id_: str, paths: dict, **kwargs) -> structure.BrainImage:
     # execute pipeline on the T1w image
     img.images[structure.BrainImageTypes.T1w] = pipeline_t1.execute(img.images[structure.BrainImageTypes.T1w])
 
+    # save the pre-processed T1w image
+    # sitk.WriteImage(img.images[structure.BrainImageTypes.T1w], os.path.join(img.path, 't1w.nii.gz'))
+
     # construct pipeline for T2w image pre-processing
     pipeline_t2 = fltr.FilterPipeline()
     if kwargs.get('registration_pre', False):
@@ -229,6 +235,9 @@ def pre_process(id_: str, paths: dict, **kwargs) -> structure.BrainImage:
     # execute pipeline on the T2w image
     img.images[structure.BrainImageTypes.T2w] = pipeline_t2.execute(img.images[structure.BrainImageTypes.T2w])
 
+    # save the pre-processed T2w image
+    # sitk.WriteImage(img.images[structure.BrainImageTypes.T2w], os.path.join(img.path, 't2w.nii.gz'))
+
     # construct pipeline for ground truth image pre-processing
     pipeline_gt = fltr.FilterPipeline()
     if kwargs.get('registration_pre', False):
@@ -239,6 +248,9 @@ def pre_process(id_: str, paths: dict, **kwargs) -> structure.BrainImage:
     # execute pipeline on the ground truth image
     img.images[structure.BrainImageTypes.GroundTruth] = pipeline_gt.execute(
         img.images[structure.BrainImageTypes.GroundTruth])
+    
+    # save the pre-processed ground truth image
+    # sitk.WriteImage(img.images[structure.BrainImageTypes.GroundTruth], os.path.join(img.path, 'ground_truth.nii.gz'))
 
     # update image properties to atlas image properties after registration
     img.image_properties = conversion.ImageProperties(img.images[structure.BrainImageTypes.T1w])

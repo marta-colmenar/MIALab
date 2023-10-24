@@ -30,16 +30,26 @@ class ImageNormalization(pymia_fltr.Filter):
 
         #TODO: normalize the image using numpy. what normalization do you want to use?
 
-        #min-max normalization
+        # histogram of non-normalized image
+        # import matplotlib.pyplot as plt
+        # plt.subplot(121)
+        # plt.title('Histogram of non-normalized image')
+        # plt.hist(img_arr.flatten(), bins=100)
+        
+        # min-max normalization
         img_arr = (img_arr - img_arr.min()) / (img_arr.max() - img_arr.min())
 
         # z-score normalization: Mean centering and scaling to unit variance
         img_arr = (img_arr - img_arr.mean()) / img_arr.std()
 
+        # save histogram of normalized and unormalized image
+        # plt.subplot(122)
+        # plt.title('Histogram of normalized image')
+        # plt.hist(img_arr.flatten(), bins=100)
+        # plt.savefig('histogram.png')
 
         img_out = sitk.GetImageFromArray(img_arr)
-        img_out.CopyInformation(image)
-        
+        img_out.CopyInformation(image)       
 
         return img_out
 
@@ -148,9 +158,10 @@ class ImageRegistration(pymia_fltr.Filter):
 
         if is_ground_truth:
             #TODO: how is ground thruth handled differently?
+            # groundtruth -- manual annotated or genererated by the known transformation?
             pass
 
-        output_image = sitk.Resample(image, atlas, transform, sitk.sitkLinear, 0.0, image.GetPixelIDValue())
+        image = sitk.Resample(image, atlas, transform, sitk.sitkLinear, 0.0, image.GetPixelIDValue())
 
         # note: if you are interested in registration, and want to test it, have a look at
         # pymia.filtering.registration.MultiModalRegistration. Think about the type of registration, i.e.
