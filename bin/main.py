@@ -7,6 +7,7 @@ import datetime
 import os
 import sys
 import timeit
+import logging
 import warnings
 
 import SimpleITK as sitk
@@ -52,6 +53,7 @@ def main(result_dir: str, data_atlas_dir: str, data_train_dir: str, data_test_di
     putil.load_atlas_images(data_atlas_dir)
 
     print('-' * 5, 'Training...')
+    logging.info('----- Training...')
 
     # crawl the training image directories
     crawler = futil.FileSystemDataCrawler(data_train_dir,
@@ -72,14 +74,20 @@ def main(result_dir: str, data_atlas_dir: str, data_train_dir: str, data_test_di
     data_train = np.concatenate([img.feature_matrix[0] for img in images])
     labels_train = np.concatenate([img.feature_matrix[1] for img in images]).squeeze()
 
-    warnings.warn('Random forest parameters not properly set.')
+    #warnings.warn('Random forest parameters not properly set.')
+    n_estimators = 40  # 100
+    max_depth = 10  # 40
+    logging.info('n_estimators: %s', n_estimators)
+    logging.info('max_depth: %s', max_depth)
     forest = sk_ensemble.RandomForestClassifier(max_features=images[0].feature_matrix[0].shape[1],
-                                                n_estimators=1,
-                                                max_depth=5)
+                                                n_estimators=n_estimators,
+                                                max_depth=max_depth)
 
     start_time = timeit.default_timer()
     forest.fit(data_train, labels_train)
+    timeelapsed=timeit.default_timer() - start_time
     print(' Time elapsed:', timeit.default_timer() - start_time, 's')
+    logging.info('----- Time elapsed: %f', timeelapsed)
 
     # create a result directory with timestamp
     t = datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
@@ -87,6 +95,7 @@ def main(result_dir: str, data_atlas_dir: str, data_train_dir: str, data_test_di
     os.makedirs(result_dir, exist_ok=True)
 
     print('-' * 5, 'Testing...')
+    logging.info('----- Testing...')
 
     # initialize evaluator
     evaluator = putil.init_evaluator()
@@ -106,11 +115,14 @@ def main(result_dir: str, data_atlas_dir: str, data_train_dir: str, data_test_di
 
     for img in images_test:
         print('-' * 10, 'Testing', img.id_)
+        logging.info('---------- Testing %s', img.id_)
 
         start_time = timeit.default_timer()
         predictions = forest.predict(img.feature_matrix[0])
         probabilities = forest.predict_proba(img.feature_matrix[0])
         print(' Time elapsed:', timeit.default_timer() - start_time, 's')
+        timeelapsed = timeit.default_timer() - start_time
+        logging.info('----- Time elapsed: %f', timeelapsed)
 
         # convert prediction and probabilities back to SimpleITK images
         image_prediction = conversion.NumpySimpleITKImageBridge.convert(predictions.astype(np.uint8),
@@ -142,13 +154,15 @@ def main(result_dir: str, data_atlas_dir: str, data_train_dir: str, data_test_di
     writer.CSVWriter(result_file).write(evaluator.results)
 
     print('\nSubject-wise results...')
-    writer.ConsoleWriter().write(evaluator.results)
+    logging.info('\nSubject-wise results...')
+    writer.ConsoleWriter(use_logging=True).write(evaluator.results)
 
     # report also mean and standard deviation among all subjects
     result_summary_file = os.path.join(result_dir, 'results_summary.csv')
     functions = {'MEAN': np.mean, 'STD': np.std}
     writer.CSVStatisticsWriter(result_summary_file, functions=functions).write(evaluator.results)
     print('\nAggregated statistic results...')
+    logging.info('\nAggregated statistic results...')
     writer.ConsoleStatisticsWriter(functions=functions).write(evaluator.results)
 
     # clear results such that the evaluator is ready for the next evaluation
@@ -157,6 +171,13 @@ def main(result_dir: str, data_atlas_dir: str, data_train_dir: str, data_test_di
 
 if __name__ == "__main__":
     """The program's entry point."""
+
+    # logger set-up
+    if not os.path.exists("../logs"):
+        os.makedirs("../logs")
+    now = datetime.datetime.now()
+    dt_string = now.strftime("%d-%m-%Y-%H-%M-%S")
+    logging.basicConfig(filename=f'../logs/{dt_string}.log', encoding='utf-8', level=logging.INFO,format='%(asctime)s %(message)s')
 
     script_dir = os.path.dirname(sys.argv[0])
 
