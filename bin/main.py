@@ -163,7 +163,7 @@ def main(result_dir: str, data_atlas_dir: str, data_train_dir: str, data_test_di
 
 if __name__ == "__main__":
     """The program's entry point."""
-
+    "test"
     # logger set-up
     if not os.path.exists("../logs"):
         os.makedirs("../logs")
