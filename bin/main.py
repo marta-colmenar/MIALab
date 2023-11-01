@@ -7,7 +7,6 @@ import datetime
 import os
 import sys
 import timeit
-import logging
 import warnings
 
 import SimpleITK as sitk
@@ -53,7 +52,6 @@ def main(result_dir: str, data_atlas_dir: str, data_train_dir: str, data_test_di
     putil.load_atlas_images(data_atlas_dir)
 
     print('-' * 5, 'Training...')
-    logging.info('----- Training...')
 
     # crawl the training image directories
     crawler = futil.FileSystemDataCrawler(data_train_dir,
@@ -75,10 +73,10 @@ def main(result_dir: str, data_atlas_dir: str, data_train_dir: str, data_test_di
     labels_train = np.concatenate([img.feature_matrix[1] for img in images]).squeeze()
 
     #warnings.warn('Random forest parameters not properly set.')
-    n_estimators = 40  # 100
-    max_depth = 10  # 40
-    logging.info('n_estimators: %s', n_estimators)
-    logging.info('max_depth: %s', max_depth)
+    n_estimators = 100  # 100
+    max_depth = 40  # 40
+    # Access the values of A and B from the command line arguments
+   
     forest = sk_ensemble.RandomForestClassifier(max_features=images[0].feature_matrix[0].shape[1],
                                                 n_estimators=n_estimators,
                                                 max_depth=max_depth)
@@ -87,7 +85,6 @@ def main(result_dir: str, data_atlas_dir: str, data_train_dir: str, data_test_di
     forest.fit(data_train, labels_train)
     timeelapsed=timeit.default_timer() - start_time
     print(' Time elapsed:', timeit.default_timer() - start_time, 's')
-    logging.info('----- Time elapsed: %f', timeelapsed)
 
     # create a result directory with timestamp
     t = datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
@@ -95,7 +92,6 @@ def main(result_dir: str, data_atlas_dir: str, data_train_dir: str, data_test_di
     os.makedirs(result_dir, exist_ok=True)
 
     print('-' * 5, 'Testing...')
-    logging.info('----- Testing...')
 
     # initialize evaluator
     evaluator = putil.init_evaluator()
@@ -115,14 +111,12 @@ def main(result_dir: str, data_atlas_dir: str, data_train_dir: str, data_test_di
 
     for img in images_test:
         print('-' * 10, 'Testing', img.id_)
-        logging.info('---------- Testing %s', img.id_)
 
         start_time = timeit.default_timer()
         predictions = forest.predict(img.feature_matrix[0])
         probabilities = forest.predict_proba(img.feature_matrix[0])
         print(' Time elapsed:', timeit.default_timer() - start_time, 's')
         timeelapsed = timeit.default_timer() - start_time
-        logging.info('----- Time elapsed: %f', timeelapsed)
 
         # convert prediction and probabilities back to SimpleITK images
         image_prediction = conversion.NumpySimpleITKImageBridge.convert(predictions.astype(np.uint8),
@@ -146,7 +140,7 @@ def main(result_dir: str, data_atlas_dir: str, data_train_dir: str, data_test_di
 
         # save results
         sitk.WriteImage(images_prediction[i], os.path.join(result_dir, images_test[i].id_ + '_SEG.mha'), True)
-        sitk.WriteImage(images_post_processed[i], os.path.join(result_dir, images_test[i].id_ + '_SEG-PP.mha'), True)
+        #sitk.WriteImage(images_post_processed[i], os.path.join(result_dir, images_test[i].id_ + '_SEG-PP.mha'), True) # is for post processed image
 
     # use two writers to report the results
     os.makedirs(result_dir, exist_ok=True)  # generate result directory, if it does not exists
@@ -154,7 +148,6 @@ def main(result_dir: str, data_atlas_dir: str, data_train_dir: str, data_test_di
     writer.CSVWriter(result_file).write(evaluator.results)
 
     print('\nSubject-wise results...')
-    logging.info('\nSubject-wise results...')
     writer.ConsoleWriter(use_logging=True).write(evaluator.results)
 
     # report also mean and standard deviation among all subjects
@@ -162,7 +155,6 @@ def main(result_dir: str, data_atlas_dir: str, data_train_dir: str, data_test_di
     functions = {'MEAN': np.mean, 'STD': np.std}
     writer.CSVStatisticsWriter(result_summary_file, functions=functions).write(evaluator.results)
     print('\nAggregated statistic results...')
-    logging.info('\nAggregated statistic results...')
     writer.ConsoleStatisticsWriter(functions=functions).write(evaluator.results)
 
     # clear results such that the evaluator is ready for the next evaluation
@@ -177,7 +169,6 @@ if __name__ == "__main__":
         os.makedirs("../logs")
     now = datetime.datetime.now()
     dt_string = now.strftime("%d-%m-%Y-%H-%M-%S")
-    logging.basicConfig(filename=f'../logs/{dt_string}.log', encoding='utf-8', level=logging.INFO,format='%(asctime)s %(message)s')
 
     script_dir = os.path.dirname(sys.argv[0])
 
