@@ -27,3 +27,7 @@ Enjoy!
 ----
 
 Found a bug or do you have suggestions? Open an issue or better submit a pull request.
+
+----
+to run for only binary classification:
+in bin/main.py set binary_classification = True and label = the label you want to classify.

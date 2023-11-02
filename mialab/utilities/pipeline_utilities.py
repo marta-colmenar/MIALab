@@ -113,10 +113,11 @@ class FeatureExtractor:
             mask = fltr_feat.RandomizedTrainingMaskGenerator.get_mask(
                 self.img.images[structure.BrainImageTypes.GroundTruth],
                 [0, 1, 2, 3, 4, 5],
-                [0.0003, 0.004, 0.003, 0.04, 0.04, 0.02])
-
+                [0.0003, 0.004, 0.003, 0.04, 0.04, 0.02],
+            )
             # convert the mask to a logical array where value 1 is False and value 0 is True
             mask = sitk.GetArrayFromImage(mask)
+
             mask = np.logical_not(mask)
 
         # generate features
@@ -162,7 +163,7 @@ class FeatureExtractor:
         return image.reshape((no_voxels, number_of_components))
 
 
-def pre_process(id_: str, paths: dict, **kwargs) -> structure.BrainImage:
+def pre_process(id_: str, paths: dict,  label: int = 0, **kwargs) -> structure.BrainImage:
     """Loads and processes an image.
 
     The processing includes:
@@ -200,9 +201,14 @@ def pre_process(id_: str, paths: dict, **kwargs) -> structure.BrainImage:
     # execute pipeline on the brain mask image
     img.images[structure.BrainImageTypes.BrainMask] = pipeline_brain_mask.execute(
         img.images[structure.BrainImageTypes.BrainMask])
+
+  
+   
+
+       
     
     # save the registered brain mask
-    # sitk.WriteImage(img.images[structure.BrainImageTypes.BrainMask], os.path.join(img.path, 'brain_mask.nii.gz'))
+    #sitk.WriteImage(img.images[structure.BrainImageTypes.BrainMask], os.path.join(img.path, 'brain_mask_2.nii.gz'))
 
     # construct pipeline for T1w image pre-processing
     pipeline_t1 = fltr.FilterPipeline()
@@ -252,9 +258,23 @@ def pre_process(id_: str, paths: dict, **kwargs) -> structure.BrainImage:
     # execute pipeline on the ground truth image
     img.images[structure.BrainImageTypes.GroundTruth] = pipeline_gt.execute(
         img.images[structure.BrainImageTypes.GroundTruth])
+
     
-    # save the pre-processed ground truth image
-    # sitk.WriteImage(img.images[structure.BrainImageTypes.GroundTruth], os.path.join(img.path, 'ground_truth.nii.gz'))
+     # set labels all labels to 0 except for amygdala label
+    
+    if label != 0:
+        # Create a mask where all values not equal to the desired label are set to False
+        mask = img.images[structure.BrainImageTypes.GroundTruth] != label
+
+        # Set all values in the mask to 0
+        img.images[structure.BrainImageTypes.GroundTruth][mask] = 0
+
+        # save the pre-processed ground truth image
+        sitk.WriteImage(img.images[structure.BrainImageTypes.GroundTruth], os.path.join(img.path, f'ground_truth_label{label}.nii.gz'))
+
+    else:
+        # save the pre-processed ground truth image
+        sitk.WriteImage(img.images[structure.BrainImageTypes.GroundTruth], os.path.join(img.path, 'ground_truth.nii.gz'))
 
     # update image properties to atlas image properties after registration
     img.image_properties = conversion.ImageProperties(img.images[structure.BrainImageTypes.T1w])
@@ -297,7 +317,7 @@ def post_process(img: structure.BrainImage, segmentation: sitk.Image, probabilit
     return pipeline.execute(segmentation)
 
 
-def init_evaluator() -> eval_.Evaluator:
+def init_evaluator(label: int = 0) -> eval_.Evaluator:
     """Initializes an evaluator.
 
     Returns:
@@ -310,19 +330,26 @@ def init_evaluator() -> eval_.Evaluator:
     #warnings.warn('Initialized evaluation with the Dice coefficient. Do you know other suitable metrics?')
 
     # define the labels to evaluate
-    labels = {1: 'WhiteMatter',
-              2: 'GreyMatter',
-              3: 'Hippocampus',
-              4: 'Amygdala',
-              5: 'Thalamus'
-              }
+
+    labels = {
+            1: "WhiteMatter",
+            2: "GreyMatter",
+            3: "Hippocampus",
+            4: "Amygdala",
+            5: "Thalamus",
+        }
+
+    if label != 0:
+        binary_labels = {label: labels[label]}
+        labels = binary_labels
+        
 
     evaluator = eval_.SegmentationEvaluator(metrics, labels)
     return evaluator
 
 
 def pre_process_batch(data_batch: t.Dict[structure.BrainImageTypes, structure.BrainImage],
-                      pre_process_params: dict = None, multi_process: bool = True) -> t.List[structure.BrainImage]:
+                      pre_process_params: dict = None, multi_process: bool = True, label: int = 0) -> t.List[structure.BrainImage]:
     """Loads and pre-processes a batch of images.
 
     The pre-processing includes:
@@ -346,7 +373,7 @@ def pre_process_batch(data_batch: t.Dict[structure.BrainImageTypes, structure.Br
     if multi_process:
         images = mproc.MultiProcessor.run(pre_process, params_list, pre_process_params, mproc.PreProcessingPickleHelper)
     else:
-        images = [pre_process(id_, path, **pre_process_params) for id_, path in params_list]
+        images = [pre_process(id_, path, label, **pre_process_params) for id_, path in params_list]
     return images
 
 

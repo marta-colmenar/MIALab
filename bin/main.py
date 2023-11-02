@@ -33,7 +33,7 @@ LOADING_KEYS = [structure.BrainImageTypes.T1w,
                 structure.BrainImageTypes.RegistrationTransform]  # the list of data we will load
 
 
-def main(result_dir: str, data_atlas_dir: str, data_train_dir: str, data_test_dir: str):
+def main(result_dir: str, data_atlas_dir: str, data_train_dir: str, data_test_dir: str, label: int = 0):
     """Brain tissue segmentation using decision forests.
 
     The main routine executes the medical image analysis pipeline:
@@ -66,7 +66,7 @@ def main(result_dir: str, data_atlas_dir: str, data_train_dir: str, data_test_di
                           'gradient_intensity_feature': True}
 
     # load images for training and pre-process
-    images = putil.pre_process_batch(crawler.data, pre_process_params, multi_process=False)
+    images = putil.pre_process_batch(crawler.data, pre_process_params, multi_process=False, label=label)
 
     # generate feature matrix and label vector
     data_train = np.concatenate([img.feature_matrix[0] for img in images])
@@ -94,7 +94,10 @@ def main(result_dir: str, data_atlas_dir: str, data_train_dir: str, data_test_di
     print('-' * 5, 'Testing...')
 
     # initialize evaluator
-    evaluator = putil.init_evaluator()
+    if binary_classification:
+        evaluator = putil.init_evaluator(label)
+    else:
+        evaluator = putil.init_evaluator()
 
     # crawl the training image directories
     crawler = futil.FileSystemDataCrawler(data_test_dir,
@@ -104,7 +107,7 @@ def main(result_dir: str, data_atlas_dir: str, data_train_dir: str, data_test_di
 
     # load images for testing and pre-process
     pre_process_params['training'] = False
-    images_test = putil.pre_process_batch(crawler.data, pre_process_params, multi_process=False)
+    images_test = putil.pre_process_batch(crawler.data, pre_process_params, multi_process=False, label=label)
 
     images_prediction = []
     images_probabilities = []
@@ -163,7 +166,11 @@ def main(result_dir: str, data_atlas_dir: str, data_train_dir: str, data_test_di
 
 if __name__ == "__main__":
     """The program's entry point."""
-    "test"
+    ##TODO: use binary classification
+
+    binary_classification = False
+    label = 5  # 1: "WhiteMatter",        2: "GreyMatter",        3: "Hippocampus",        4: "Amygdala",        5: "Thalamus",
+
     # logger set-up
     if not os.path.exists("../logs"):
         os.makedirs("../logs")
@@ -203,4 +210,19 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-    main(args.result_dir, args.data_atlas_dir, args.data_train_dir, args.data_test_dir)
+    if binary_classification:
+        main(
+            args.result_dir,
+            args.data_atlas_dir,
+            args.data_train_dir,
+            args.data_test_dir,
+            label,
+        )
+    else:
+        main(
+            args.result_dir,
+            args.data_atlas_dir,
+            args.data_train_dir,
+            args.data_test_dir,
+        )
+
