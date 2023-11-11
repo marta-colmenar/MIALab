@@ -15,6 +15,11 @@ import numpy as np
 import pymia.data.conversion as conversion
 import pymia.evaluation.writer as writer
 
+import joblib
+
+if sys.version_info[0:2] > (3, 9):
+    raise Exception('Python version above 3.9 may cause problems with SimpleITK. [BufferError: memoryview has 1 exported buffer]')
+
 try:
     import mialab.data.structure as structure
     import mialab.utilities.file_access_utilities as futil
@@ -32,6 +37,96 @@ LOADING_KEYS = [structure.BrainImageTypes.T1w,
                 structure.BrainImageTypes.BrainMask,
                 structure.BrainImageTypes.RegistrationTransform]  # the list of data we will load
 
+# quickening the programm for debugging
+CUT_DATA=True
+CUTOFF_NUMBER=1#3
+USE_JOBLIB=True
+WEIGHTED_DICE=True
+
+def get_dice_scores_for_all_labels(results):
+    unique_labels = set(
+        result.label for result in results if result.metric == 'DICE')
+    dice_scores_per_label = {}
+    for label in unique_labels:
+        dice_scores_per_label[label] = [result.value for result in results if result.metric == 'DICE' and result.label == label]
+    return dice_scores_per_label
+
+def get_voxel_count_per_label(img):
+    image_array = sitk.GetArrayFromImage(img)
+    unique_labels = np.unique(image_array)
+    #volume_per_label = []
+    volume_per_label = {}
+    for label in unique_labels:
+        # Extract the voxel indices for the current label
+        label_indices = np.where(image_array == label)
+
+        # Calculate the size of the label in each dimension
+        size_x = (np.max(label_indices[0]) - np.min(label_indices[0]) + 1)
+        size_y = (np.max(label_indices[1]) - np.min(label_indices[1]) + 1)
+        size_z = (np.max(label_indices[2]) - np.min(label_indices[2]) + 1)
+
+        volume = size_x * size_y * size_z
+        volume_per_label[label] = volume
+    return volume_per_label
+
+def map_fields(init_dict, map_dict, res_dict=None):
+
+    res_dict = res_dict or {}
+    for k, v in init_dict.items():
+        if isinstance(v, dict):
+            v = map_fields(v, map_dict[k])
+        elif k in map_dict.keys():
+            k = str(map_dict[k])
+        res_dict[k] = v
+    return res_dict
+
+def order_dicts(dict1, dict2):
+    """
+    Reorder two dictionaries based on their keys.
+
+    Parameters:
+    - dict1: Input dictionary 1.
+    - dict2: Input dictionary 2.
+
+    Returns:
+    - Reordered OrderedDicts.
+    """
+    ordered_keys = sorted(dict1.keys())
+    return {key: dict2[key] for key in ordered_keys}
+
+
+def calculate_weighted_dice_score_per_label(dice_scores_per_label, volume_per_label,reference_volume):
+    if len(dice_scores_per_label) != len(dice_scores_per_label):
+        raise ValueError("Lengths of dice_scores and voxel_counts must be the same.")
+
+    if list(dice_scores_per_label.keys()) != list(volume_per_label.keys()):
+        voxel_counts_ordered = order_dicts(dice_scores_per_label, volume_per_label)
+        #raise ValueError("Order of keys in dice_scores and voxel_counts must be the same.")
+
+    # Calculate the weighted sum of Dice scores
+    weighted_sum = sum(dice_scores_per_label[label] * volume_per_label[label] for label in dice_scores_per_label.keys())
+    #fixme gives total weighted sum, not good!!
+    weighted_dice = weighted_sum / sum(volume_per_label.values())
+    # Calculate the weighted sum of Dice scores
+    # if reference_volume is None:
+    #     reference_volume = sum(volume_per_label.values()) #todo raise error instead
+    #
+    #     # Calculate weighted dice scores per label
+    # weighted_dice_scores = {label: dice * (volume / reference_volume) for label, dice, volume in
+    #                         zip(dice_scores_per_label.keys(), dice_scores_per_label.values(),
+    #                             volume_per_label.values())}
+    #
+    # return weighted_dice_scores
+    # Calculate the weighted sum of Dice scores
+    #weighted_sum = sum(dice * count for dice, count in zip(dice_scores_per_label, volume_per_label))
+
+    # Calculate the total voxel count
+    total_voxel_count = sum(volume_per_label)
+
+    # Calculate the weighted Dice score
+    weighted_dice = weighted_sum / total_voxel_count
+
+    return weighted_dice
 
 def main(result_dir: str, data_atlas_dir: str, data_train_dir: str, data_test_dir: str, label: int = 0):
     """Brain tissue segmentation using decision forests.
@@ -49,7 +144,7 @@ def main(result_dir: str, data_atlas_dir: str, data_train_dir: str, data_test_di
     """
 
     # load atlas images
-    putil.load_atlas_images(data_atlas_dir)
+    total_voxels_avg=putil.load_atlas_images(data_atlas_dir)
 
     print('-' * 5, 'Training...')
 
@@ -65,26 +160,34 @@ def main(result_dir: str, data_atlas_dir: str, data_train_dir: str, data_test_di
                           'intensity_feature': True,
                           'gradient_intensity_feature': True}
 
-    # load images for training and pre-process
-    images = putil.pre_process_batch(crawler.data, pre_process_params, multi_process=False, label=label)
+    if not USE_JOBLIB:
 
-    # generate feature matrix and label vector
-    data_train = np.concatenate([img.feature_matrix[0] for img in images])
-    labels_train = np.concatenate([img.feature_matrix[1] for img in images]).squeeze()
+        images = putil.pre_process_batch(crawler.data, pre_process_params, multi_process=False, label=label)
 
-    #warnings.warn('Random forest parameters not properly set.')
-    n_estimators = 100  # 100
-    max_depth = 40  # 40
-    # Access the values of A and B from the command line arguments
-   
-    forest = sk_ensemble.RandomForestClassifier(max_features=images[0].feature_matrix[0].shape[1],
-                                                n_estimators=n_estimators,
-                                                max_depth=max_depth)
+        # generate feature matrix and label vector
+        data_train = np.concatenate([img.feature_matrix[0] for img in images])
+        labels_train = np.concatenate([img.feature_matrix[1] for img in images]).squeeze()
 
-    start_time = timeit.default_timer()
-    forest.fit(data_train, labels_train)
-    timeelapsed=timeit.default_timer() - start_time
-    print(' Time elapsed:', timeit.default_timer() - start_time, 's')
+        n_estimators = 100  # 100
+        max_depth = 40  # 40
+
+        forest = sk_ensemble.RandomForestClassifier(max_features=images[0].feature_matrix[0].shape[1],
+                                                    n_estimators=n_estimators,
+                                                    max_depth=max_depth)
+
+        start_time = timeit.default_timer()
+        forest.fit(data_train, labels_train)
+        print(' Time elapsed:', timeit.default_timer() - start_time, 's')
+
+        joblib.dump(forest, 'forest.pkl')
+    else:
+        try:
+            forest = joblib.load('forest.pkl')
+            print('[INFO] Use old forest.pkl')
+        except:
+            print('[ERROR] No pickle file found, cancelling program')
+            print('[ERROR] Please set "USE_JOBLIB=False" before next run')
+            exit(1)
 
     # create a result directory with timestamp
     t = datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
@@ -107,7 +210,14 @@ def main(result_dir: str, data_atlas_dir: str, data_train_dir: str, data_test_di
 
     # load images for testing and pre-process
     pre_process_params['training'] = False
-    images_test = putil.pre_process_batch(crawler.data, pre_process_params, multi_process=False, label=label)
+    if CUT_DATA == True:
+        data_list = list(crawler.data.items())[:CUTOFF_NUMBER]
+        subset_data = dict(data_list)
+        images_test = putil.pre_process_batch(subset_data, pre_process_params, multi_process=False, label=label)
+        print(f'[DEBUG] Data was cut to {CUTOFF_NUMBER} image(s)')
+    else:
+    # load images for training and pre-process
+        images_test = putil.pre_process_batch(crawler.data, pre_process_params, multi_process=False, label=label)
 
     images_prediction = []
     images_probabilities = []
@@ -137,18 +247,64 @@ def main(result_dir: str, data_atlas_dir: str, data_train_dir: str, data_test_di
     images_post_processed = putil.post_process_batch(images_test, images_prediction, images_probabilities,
                                                      post_process_params, multi_process=True)
 
+    # evaluate segmentation with post-processing
     for i, img in enumerate(images_test):
         evaluator.evaluate(images_post_processed[i], img.images[structure.BrainImageTypes.GroundTruth],
                            img.id_ + '-PP')
-
         # save results
         sitk.WriteImage(images_prediction[i], os.path.join(result_dir, images_test[i].id_ + '_SEG.mha'), True)
-        #sitk.WriteImage(images_post_processed[i], os.path.join(result_dir, images_test[i].id_ + '_SEG-PP.mha'), True) # is for post processed image
+
 
     # use two writers to report the results
     os.makedirs(result_dir, exist_ok=True)  # generate result directory, if it does not exists
     result_file = os.path.join(result_dir, 'results.csv')
     writer.CSVWriter(result_file).write(evaluator.results)
+
+
+    # get dice scores for all labels
+    dice_scores_all_labels = get_dice_scores_for_all_labels(evaluator.results)
+
+    # Remove the second entry [1] from each list (for some reason I get double entries for each label)
+    dice_scores_all_labels = {label: score[0] for label, score in dice_scores_all_labels.items()}
+
+    label_mapping = {
+        0: 'Background',
+        1: 'WhiteMatter',
+        2: 'GreyMatter',
+        3: 'Hippocampus',
+        4: 'Amygdala',
+        5: 'Thalamus'
+        # Add more labels as needed
+    }
+    #Get voxel count per label
+    volume_per_img = [map_fields(get_voxel_count_per_label(img),label_mapping) for img in images_prediction]
+
+    # Calculate the total voxel count per label
+    voxel_count_per_label = {}
+    for volume_dict in volume_per_img:
+        for label, volume in volume_dict.items():
+            if label not in voxel_count_per_label:
+                voxel_count_per_label[label] = []
+            voxel_count_per_label[label].append(volume)
+
+    # Calculate the mean voxel count per label
+    mean_voxel_count_per_label = {label: np.mean(volumes) for label, volumes in voxel_count_per_label.items()}
+
+    #calculate ratio from atlas
+    #ratio_voxel_count_per_label = {label: volume / total_voxels_avg for label, volume in mean_voxel_count_per_label.items()}
+    del mean_voxel_count_per_label["Background"]#remove background #fixme background same as total_voxels_avg???
+
+    weighted_dice_scores = calculate_weighted_dice_score_per_label(dice_scores_all_labels, mean_voxel_count_per_label,reference_volume=total_voxels_avg)
+
+    if WEIGHTED_DICE:
+        print("Weighted Dice Scores per Label:")
+        for label, score in weighted_dice_scores.items():
+            print(f"Label {label}: {score}")
+        weighted_dice_file = os.path.join(result_dir, 'weighted_dice.txt')
+        with open(weighted_dice_file, 'w') as f:
+            for label, score in weighted_dice_scores.items():
+                f.write(f"Label {label}: {score}\n")
+
 
     print('\nSubject-wise results...')
     writer.ConsoleWriter(use_logging=True).write(evaluator.results)
@@ -163,6 +319,8 @@ def main(result_dir: str, data_atlas_dir: str, data_train_dir: str, data_test_di
     # clear results such that the evaluator is ready for the next evaluation
     evaluator.clear()
 
+# extract dice scores for all labels
+
 
 if __name__ == "__main__":
     """The program's entry point."""
@@ -171,11 +329,7 @@ if __name__ == "__main__":
     binary_classification = False
     label = 5  # 1: "WhiteMatter",        2: "GreyMatter",        3: "Hippocampus",        4: "Amygdala",        5: "Thalamus",
 
-    # logger set-up
-    if not os.path.exists("../logs"):
-        os.makedirs("../logs")
-    now = datetime.datetime.now()
-    dt_string = now.strftime("%d-%m-%Y-%H-%M-%S")
+
 
     script_dir = os.path.dirname(sys.argv[0])
 

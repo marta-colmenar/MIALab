@@ -35,6 +35,14 @@ def load_atlas_images(directory: str):
     if not conversion.ImageProperties(atlas_t1) == conversion.ImageProperties(atlas_t2):
         raise ValueError('T1w and T2w atlas images have not the same image properties')
 
+    # # calculate voxel siize of atlas
+    size = atlas_t1.GetSize()
+    total_voxels_t1 = size[0] * size[1] * size[2]
+    size = atlas_t2.GetSize()
+    total_voxels_t2 = size[0] * size[1] * size[2]
+    # todo the should have the same value anyway, but to be sure
+    total_voxels_avg=(total_voxels_t1+total_voxels_t2)/2
+    return total_voxels_avg
 
 class FeatureImageTypes(enum.Enum):
     """Represents the feature image types."""
@@ -323,7 +331,6 @@ def init_evaluator(label: int = 0) -> eval_.Evaluator:
     Returns:
         eval.Evaluator: An evaluator.
     """
-
     # initialize metrics
     metrics = [metric.DiceCoefficient(),metric.HausdorffDistance(percentile=95)]
     # todo: add hausdorff distance, 95th percentile (see metric.HausdorffDistance)
