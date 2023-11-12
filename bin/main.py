@@ -16,6 +16,7 @@ import pymia.data.conversion as conversion
 import pymia.evaluation.writer as writer
 
 import joblib
+from sklearn.model_selection import GridSearchCV
 
 if sys.version_info[0:2] > (3, 9):
     raise Exception('Python version above 3.9 may cause problems with SimpleITK. [BufferError: memoryview has 1 exported buffer]')
@@ -42,6 +43,22 @@ CUT_DATA=True
 CUTOFF_NUMBER=1#3
 USE_JOBLIB=True
 WEIGHTED_DICE=True
+
+# Define the parameter grid
+param_grid = {
+    'n_estimators': [50, 100, 150],
+    'max_depth': [None, 10, 20, 30]
+}
+
+label_mapping = {
+            0: 'Background',
+            1: 'WhiteMatter',
+            2: 'GreyMatter',
+            3: 'Hippocampus',
+            4: 'Amygdala',
+            5: 'Thalamus'
+
+        }
 
 def get_dice_scores_for_all_labels(results):
     unique_labels = set(
@@ -81,52 +98,26 @@ def map_fields(init_dict, map_dict, res_dict=None):
     return res_dict
 
 def order_dicts(dict1, dict2):
-    """
-    Reorder two dictionaries based on their keys.
 
-    Parameters:
-    - dict1: Input dictionary 1.
-    - dict2: Input dictionary 2.
-
-    Returns:
-    - Reordered OrderedDicts.
-    """
     ordered_keys = sorted(dict1.keys())
     return {key: dict2[key] for key in ordered_keys}
 
 
-def calculate_weighted_dice_score_per_label(dice_scores_per_label, volume_per_label,reference_volume):
+def calculate_weighted_dice_score_per_label(dice_scores_per_label, volume_per_label):
     if len(dice_scores_per_label) != len(dice_scores_per_label):
         raise ValueError("Lengths of dice_scores and voxel_counts must be the same.")
 
     if list(dice_scores_per_label.keys()) != list(volume_per_label.keys()):
         voxel_counts_ordered = order_dicts(dice_scores_per_label, volume_per_label)
-        #raise ValueError("Order of keys in dice_scores and voxel_counts must be the same.")
 
-    # Calculate the weighted sum of Dice scores
-    weighted_sum = sum(dice_scores_per_label[label] * volume_per_label[label] for label in dice_scores_per_label.keys())
-    #fixme gives total weighted sum, not good!!
-    weighted_dice = weighted_sum / sum(volume_per_label.values())
-    # Calculate the weighted sum of Dice scores
-    # if reference_volume is None:
-    #     reference_volume = sum(volume_per_label.values()) #todo raise error instead
-    #
-    #     # Calculate weighted dice scores per label
-    # weighted_dice_scores = {label: dice * (volume / reference_volume) for label, dice, volume in
-    #                         zip(dice_scores_per_label.keys(), dice_scores_per_label.values(),
-    #                             volume_per_label.values())}
-    #
-    # return weighted_dice_scores
-    # Calculate the weighted sum of Dice scores
-    #weighted_sum = sum(dice * count for dice, count in zip(dice_scores_per_label, volume_per_label))
+        # Calculate the total voxel count
+        total_voxel_count = sum(voxel_counts_ordered.values())
 
-    # Calculate the total voxel count
-    total_voxel_count = sum(volume_per_label)
-
-    # Calculate the weighted Dice score
-    weighted_dice = weighted_sum / total_voxel_count
-
-    return weighted_dice
+        # Calculate the weighted Dice scores per label
+        #weighted_dice_scores = [(1 - voxel_counts_ordered[label] / total_voxel_count) for label in dice_scores_per_label.keys()]
+        weighted_dice_scores = {label: (1 - voxel_counts_ordered[label] / total_voxel_count) for label in
+                                dice_scores_per_label.keys()}
+        return weighted_dice_scores
 
 def main(result_dir: str, data_atlas_dir: str, data_train_dir: str, data_test_dir: str, label: int = 0):
     """Brain tissue segmentation using decision forests.
@@ -260,43 +251,35 @@ def main(result_dir: str, data_atlas_dir: str, data_train_dir: str, data_test_di
     result_file = os.path.join(result_dir, 'results.csv')
     writer.CSVWriter(result_file).write(evaluator.results)
 
-
-    # get dice scores for all labels
-    dice_scores_all_labels = get_dice_scores_for_all_labels(evaluator.results)
-
-    # Remove the second entry [1] from each list (for some reason I get double entries for each label)
-    dice_scores_all_labels = {label: score[0] for label, score in dice_scores_all_labels.items()}
-
-    label_mapping = {
-        0: 'Background',
-        1: 'WhiteMatter',
-        2: 'GreyMatter',
-        3: 'Hippocampus',
-        4: 'Amygdala',
-        5: 'Thalamus'
-        # Add more labels as needed
-    }
-    #Get voxel count per label
-    volume_per_img = [map_fields(get_voxel_count_per_label(img),label_mapping) for img in images_prediction]
-
-    # Calculate the total voxel count per label
-    voxel_count_per_label = {}
-    for volume_dict in volume_per_img:
-        for label, volume in volume_dict.items():
-            if label not in voxel_count_per_label:
-                voxel_count_per_label[label] = []
-            voxel_count_per_label[label].append(volume)
-
-    # Calculate the mean voxel count per label
-    mean_voxel_count_per_label = {label: np.mean(volumes) for label, volumes in voxel_count_per_label.items()}
-
-    #calculate ratio from atlas
-    #ratio_voxel_count_per_label = {label: volume / total_voxels_avg for label, volume in mean_voxel_count_per_label.items()}
-    del mean_voxel_count_per_label["Background"]#remove background #fixme background same as total_voxels_avg???
-
-    weighted_dice_scores = calculate_weighted_dice_score_per_label(dice_scores_all_labels, mean_voxel_count_per_label,reference_volume=total_voxels_avg)
-
     if WEIGHTED_DICE:
+        # get dice scores for all labels
+        dice_scores_all_labels = get_dice_scores_for_all_labels(evaluator.results)
+
+        # Remove the second entry [1] from each list (for some reason I get double entries for each label)
+        dice_scores_all_labels = {label: score[0] for label, score in dice_scores_all_labels.items()}
+
+
+        #Get voxel count per label
+        volume_per_img = [map_fields(get_voxel_count_per_label(img),label_mapping) for img in images_prediction]
+
+        # Calculate the total voxel count per label
+        voxel_count_per_label = {}
+        for volume_dict in volume_per_img:
+            for label, volume in volume_dict.items():
+                if label not in voxel_count_per_label:
+                    voxel_count_per_label[label] = []
+                voxel_count_per_label[label].append(volume)
+
+        # Calculate the mean voxel count per label
+        mean_voxel_count_per_label = {label: np.mean(volumes) for label, volumes in voxel_count_per_label.items()}
+
+        #calculate ratio from atlas
+        #ratio_voxel_count_per_label = {label: volume / total_voxels_avg for label, volume in mean_voxel_count_per_label.items()}
+        del mean_voxel_count_per_label["Background"]#remove background #fixme background same as total_voxels_avg???
+
+        weighted_dice_scores = calculate_weighted_dice_score_per_label(dice_scores_all_labels, mean_voxel_count_per_label)
+
+
         print("Weighted Dice Scores per Label:")
         for label, score in weighted_dice_scores.items():
             print(f"Label {label}: {score}")
