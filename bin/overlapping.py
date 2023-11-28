@@ -14,6 +14,7 @@ import sklearn.ensemble as sk_ensemble
 import numpy as np
 import pymia.data.conversion as conversion
 import pymia.evaluation.writer as writer
+import pymia.filtering.filter as pymia_filter
 
 import joblib
 from sklearn.model_selection import GridSearchCV
@@ -21,6 +22,9 @@ import configparser
 import logging
 import copy
 import itertools
+import pymia.filtering.filter as pymia_filter
+import SimpleITK as sitk
+import numpy as np
 
 if sys.version_info[0:2] > (3, 9):
     raise Exception('Python version above 3.9 may cause problems with SimpleITK. [BufferError: memoryview has 1 exported buffer]')
@@ -42,238 +46,189 @@ LOADING_KEYS = [structure.BrainImageTypes.T1w,
                 structure.BrainImageTypes.BrainMask,
                 structure.BrainImageTypes.RegistrationTransform]  # the list of data we will load
 
-def compute_overlap_and_subtract(larger_structure, smaller_structure):
-    # Threshold to create binary masks
-    threshold1 = sitk.BinaryThreshold(larger_structure, lowerThreshold=0.5)
-    larger_binary = sitk.Cast(threshold1, sitk.sitkUInt8)
 
-    threshold2 = sitk.BinaryThreshold(smaller_structure, lowerThreshold=0.5)
-    smaller_binary = sitk.Cast(threshold2, sitk.sitkUInt8)
+def compute_intersection(structure_a, structure_b):
+    """Computes the intersection of two structures."""
 
-    # Compute the intersection
-    intersection = sitk.And(larger_binary, smaller_binary)
-
-    # Subtract the overlapping region from the larger structure
-    larger_structure -= intersection
-
-    return intersection, larger_structure
-def load_and_average_mha_files(folder_path):
-    files = [f for f in os.listdir(folder_path) if f.endswith('.mha')]
-    images = [sitk.ReadImage(os.path.join(folder_path, file)) for file in files]
-
-    # Ensure all images have the same origin, spacing, and direction
-    reference_image = images[0]
-    for image in images[1:]:
-        if image.GetOrigin() != reference_image.GetOrigin() or \
-           image.GetSpacing() != reference_image.GetSpacing() or \
-           image.GetDirection() != reference_image.GetDirection():
-            raise RuntimeError("Images do not occupy the same physical space.")
-
-    # Assuming all images have the same size, use the size of the first image
-    size = reference_image.GetSize()
-    average_image = sitk.Image(size, sitk.sitkFloat32)
-
-    # Set the physical space of the average image based on the first image
-    average_image = sitk.Image(images[0].GetSize(), sitk.sitkFloat32)
-    average_image.SetOrigin(images[0].GetOrigin())
-    average_image.SetSpacing(images[0].GetSpacing())
-    average_image.SetDirection(images[0].GetDirection())
-
-    # Create a separate variable for the sum
-    sum_image = sitk.Image(images[0].GetSize(), sitk.sitkFloat32)
-    sum_image.SetOrigin(images[0].GetOrigin())
-    sum_image.SetSpacing(images[0].GetSpacing())
-    sum_image.SetDirection(images[0].GetDirection())
-
-    for image in images:
-        # Convert to float for averaging
-        image_float = sitk.Cast(image, sitk.sitkFloat32)
-        average_image += image_float
-
-    # Calculate the average
-    average_image /= len(images)
-
-    return average_image
-
-def compute_overlap_and_subtract(seg1, seg2):
-    # Threshold to create binary masks
-    threshold1 = sitk.BinaryThreshold(seg1, lowerThreshold=0.5)
-    seg1_binary = sitk.Cast(threshold1, sitk.sitkUInt8)
-
-    threshold2 = sitk.BinaryThreshold(seg2, lowerThreshold=0.5)
-    seg2_binary = sitk.Cast(threshold2, sitk.sitkUInt8)
+    # Set the same origin, spacing, and direction
+    structure_a.SetOrigin(structure_b.GetOrigin())
+    structure_a.SetSpacing(structure_b.GetSpacing())
+    structure_a.SetDirection(structure_b.GetDirection())
 
     # Compute the intersection
-    intersection = sitk.And(seg1_binary, seg2_binary)
+    intersection = sitk.And(structure_a, structure_b)
 
-    # Cast intersection to 32-bit float
-    intersection_float = sitk.Cast(intersection, sitk.sitkFloat32)
+    # Count non-zero voxels in the intersection
+    voxel_count_intersection = sitk.GetArrayFromImage(intersection).sum()
 
-    # Compute the size of the intersection region in voxels
-    overlap_size = sitk.GetArrayFromImage(intersection_float).sum()
+    return voxel_count_intersection
 
-    # Determine the smaller and larger structures
-    if seg1.GetSize() < seg2.GetSize():
-        smaller_structure = seg1
-        larger_structure = seg2
-    else:
-        smaller_structure = seg2
-        larger_structure = seg1
+def calculate_overlap_matrix(segmentation_images):
+    """Calculates the overlap matrix for the given segmentation images."""
 
-    # Cast smaller_structure to 32-bit float
-    smaller_structure_float = sitk.Cast(smaller_structure, sitk.sitkFloat32)
+    # Initialize the overlap matrix
+    num_labels = len(segmentation_images)
+    overlap_matrix = [[0] * num_labels for _ in range(num_labels)]
 
-
-    # Subtract the overlapping region from the smaller structure
-    smaller_structure_float -= intersection_float
-
-    return overlap_size, smaller_structure_float
-def dice_similarity_coefficient(seg1, seg2):
-    # Threshold to create binary masks
-    threshold = sitk.BinaryThreshold(seg1, lowerThreshold=0.5)
-    seg1_binary = sitk.Cast(threshold, sitk.sitkUInt8)
-
-    threshold = sitk.BinaryThreshold(seg2, lowerThreshold=0.5)
-    seg2_binary = sitk.Cast(threshold, sitk.sitkUInt8)
-
-    # Perform AND operation on binary masks
-    intersection = sitk.And(seg1_binary, seg2_binary)
-
-    # Calculate Dice coefficient
-    dice = (2.0 * sitk.GetArrayFromImage(intersection).sum()) / (
-                sitk.GetArrayFromImage(seg1_binary).sum() + sitk.GetArrayFromImage(seg2_binary).sum())
-
-    return dice
-
-def calculate_pairwise_dice_similarity(average_images):
-    num_labels = len(average_images)
-    dice_matrix = [[0.0] * num_labels for _ in range(num_labels)]
-
-    for i, j in itertools.combinations(range(num_labels), 2):
-        dice_value = dice_similarity_coefficient(average_images[i], average_images[j])
-        dice_matrix[i][j] = dice_value
-        dice_matrix[j][i] = dice_value
-
-    return dice_matrix
-
-def calculate_pairwise_overlap_substr(structures):
-    num_structures = len(structures)
-    overlap_matrix = [[0] * num_structures for _ in range(num_structures)]
-
-    for i, j in itertools.combinations(range(num_structures), 2):
-        overlap_size, smaller_structure = compute_overlap_and_subtract(structures[i], structures[j])
-        overlap_matrix[i][j] = overlap_size
-        overlap_matrix[j][i] = overlap_size
-
-        # Optionally, you can use or save the modified smaller_structure
+    # Iterate through all combinations of segmentation images
+    for (i, segmentation_image_i), (j, segmentation_image_j) in itertools.product(
+            enumerate(segmentation_images), repeat=2):
+        # Calculate the intersection (overlap) instead of voxel count difference
+        intersection_count = compute_intersection(segmentation_image_i, segmentation_image_j)
+        overlap_matrix[i][j] = intersection_count
+        overlap_matrix[j][i] = intersection_count  # Symmetric matrix
 
     return overlap_matrix
 
-def compute_overlap_size(seg1, seg2):
-    # Threshold to create binary masks
-    threshold1 = sitk.BinaryThreshold(seg1, lowerThreshold=0.5)
-    seg1_binary = sitk.Cast(threshold1, sitk.sitkUInt8)
 
-    threshold2 = sitk.BinaryThreshold(seg2, lowerThreshold=0.5)
-    seg2_binary = sitk.Cast(threshold2, sitk.sitkUInt8)
+def rename_folders(input_folder, legend):
+    """Renames the folders in the input folder based on the legend."""
+    # List all folders in the directory
+    folders = [f for f in os.listdir(input_folder) if os.path.isdir(os.path.join(input_folder, f))]
 
-    # Compute the intersection
-    intersection = sitk.And(seg1_binary, seg2_binary)
+    # Iterate through the folders and rename them based on the legend
+    for folder_name in folders:
+        # Check if the folder name is in the legend
+        if folder_name in legend:
+            new_name = legend[folder_name]
 
-    # Compute the size of the intersection region in voxels
-    overlap_size = sitk.GetArrayFromImage(intersection).sum()
+            # Construct the full paths
+            old_path = os.path.join(input_folder, folder_name)
+            new_path = os.path.join(input_folder, new_name)
 
-    return overlap_size
-def calculate_pairwise_overlap(structures):
-    num_structures = len(structures)
-    overlap_matrix = [[0] * num_structures for _ in range(num_structures)]
+            # Rename the folder
+            os.rename(old_path, new_path)
 
-    for i, j in itertools.combinations(range(num_structures), 2):
-        overlap_size = compute_overlap_size(structures[i], structures[j])
-        overlap_matrix[i][j] = overlap_size
-        overlap_matrix[j][i] = overlap_size
+            print(f"Renamed folder: {folder_name} -> {new_name}")
+        else:
+            print(f"No legend entry for folder: {folder_name}")
 
-    return overlap_matrix
+    # Get specific folder paths
+    folder_paths = [os.path.join(input_folder, folder_name) for folder_name in legend.values()]
 
-def calculate_voxel_size(structure):
-    spacing = structure.GetSpacing()
-    voxel_size = np.prod(spacing)
-    return voxel_size
-def calculate_and_save_overlaps_old(structures, output_folder):
-    # Sort structures by voxel size in descending order
-    structures.sort(key=calculate_voxel_size, reverse=True)
-
-    num_structures = len(structures)
-    overlap_matrix = [[None] * num_structures for _ in range(num_structures)]
-
-    for i in range(num_structures):
-        for j in range(i + 1, num_structures):
-            overlap_region, structures[i] = compute_overlap_and_subtract(structures[i], structures[j])
-            overlap_matrix[i][j] = overlap_region
-
-    # Save the modified structures as .mha files
-    for i, structure in enumerate(structures):
-        output_path = os.path.join(output_folder, f"modified_structure_{i}.mha")
-        sitk.WriteImage(structure, output_path )
-
-    return overlap_matrix
-
-def calculate_and_save_overlaps(label_folders, output_folder):
-    # Ensure the output folder exists
-    os.makedirs(output_folder, exist_ok=True)
-
-    num_labels = len(label_folders)
-    overlap_matrix = [[None] * num_labels for _ in range(num_labels)]
-
-    for i, label_folder_i in enumerate(label_folders):
-        structures_i = []
-        for label_path_i in os.listdir(label_folder_i):
-            if label_path_i.endswith(".mha"):  # Only consider image files
-                structure_i = sitk.ReadImage(os.path.join(label_folder_i, label_path_i))
-                structures_i.append(structure_i)
-
-        for j, label_folder_j in enumerate(label_folders):
-            if i != j:
-                structures_j = []
-                for label_path_j in os.listdir(label_folder_j):
-                    if label_path_j.endswith(".mha"):  # Only consider image files
-                        structure_j = sitk.ReadImage(os.path.join(label_folder_j, label_path_j))
-                        structures_j.append(structure_j)
-
-                for idx, (structure_i, structure_j) in enumerate(zip(structures_i, structures_j)):
-                    overlap_region, structures_i[idx] = compute_overlap_and_subtract(structure_i, structure_j)
-                    overlap_matrix[i][j] = overlap_region
-
-        # Save the modified structures for each label and patient
-        for idx, (structure_i, patient_id_i) in enumerate(zip(structures_i, os.listdir(label_folder_i))):
-            output_path = os.path.join(output_folder, os.path.basename(label_folder_i), patient_id_i)
-            os.makedirs(output_path, exist_ok=True)
-            output_path = os.path.join(output_path, f"modified_structure_{idx}.mha")
-            sitk.WriteImage(structure_i, output_path)
-
-    return overlap_matrix
-def main(result_dir: str, data_atlas_dir: str, data_train_dir: str, data_test_dir: str, config_section: str):
+    return folder_paths
+def main():
     """ Overlapping calulation """
 
-    output_folder = r"C:\Users\FlipFlop\Documents\UniBE\Sem5_MedImLab\Repo\MIALab\overlapping_output"
+    # Define the input and output folders
+    output_folder = r'.\overlapping_output'
+    input_folder = r'.\from_ubelix'
+    os.makedirs(input_folder, exist_ok=True)
+    os.makedirs(output_folder, exist_ok=True)
 
-    #get folders
-    white_matter_folder = r'C:\Users\FlipFlop\Documents\UniBE\Sem5_MedImLab\Repo\MIALab\fromubelix\2023-11-21-01-51-25'
-    grey_matter_folder = r'C:\Users\FlipFlop\Documents\UniBE\Sem5_MedImLab\Repo\MIALab\fromubelix\2023-11-21-01-49-34'
-    thalamus_matter_folder = r'C:\Users\FlipFlop\Documents\UniBE\Sem5_MedImLab\Repo\MIALab\fromubelix\2023-11-21-01-46-42'
-    hippocampus_matter_folder =r'C:\Users\FlipFlop\Documents\UniBE\Sem5_MedImLab\Repo\MIALab\fromubelix\2023-11-21-01-46-28'
-    amygdala_matter_folder=r'C:\Users\FlipFlop\Documents\UniBE\Sem5_MedImLab\Repo\MIALab\fromubelix\2023-11-21-01-44-52'
+    # Define a legend to map folder names to structure names
+    # todo get from runinfo.txt instead
+    legend = {
+        '2023-11-21-01-51-25': 'white_matter',
+        '2023-11-21-01-49-34': 'grey_matter',
+        '2023-11-21-01-46-42': 'thalamus_matter',
+        '2023-11-21-01-46-28': 'hippocampus_matter',
+        '2023-11-21-01-44-52': 'amygdala_matter',
+        # Add more mappings as needed
+    }
 
-    label_folders = [white_matter_folder, grey_matter_folder, thalamus_matter_folder, hippocampus_matter_folder,
-                       amygdala_matter_folder]
-
-    overlap_matrix = calculate_and_save_overlaps(label_folders, output_folder)
+    # Rename the folders
+    folder_paths = rename_folders(input_folder, legend)
 
 
-    # Print or use the overlap_matrix as needed
-    print("Overlapping Regions (larger to smaller structures):")
-    for row in overlap_matrix:
-        print(row)
+    # get patient list
+    import glob
+    # List all segmentation files in the label folder
+    segmentation_files = glob.glob(os.path.join(folder_paths[0], '*.mha'))#just take a random folder
+    segmentation_files_basenames=[os.path.basename(segmentation_file) for segmentation_file in segmentation_files]
+    patient_list=[segmentation_files_basename.split('_')[0] for segmentation_files_basename in segmentation_files_basenames]
+
+    # Iterate through the patients
+    patient_list=[patient_list[0]]#TODO remove
+    for patient in patient_list:
+
+        print("==patient==: ", patient)
+
+        # Get the segmentation files for the current patient
+        segmentation_files = [os.path.join(label_folder, f"{patient}_seg.mha") for label_folder in folder_paths]
+
+        # Load the segmentation images
+        segmentation_images = [sitk.ReadImage(segmentation_file) for segmentation_file in segmentation_files]
+
+        # Calculate the overlap matrix
+        overlap_matrix = calculate_overlap_matrix(segmentation_images)
+        print("Overlap Matrix - original:")
+        for row in overlap_matrix: print(row)
+
+        # Convert to numpy arrays
+        segmentation_arrays = [sitk.GetArrayFromImage(segmentation_image) for segmentation_image in segmentation_images]
+
+        # Count voxels for each structure
+        structure_voxel_count = [np.count_nonzero(segmentation_array) for segmentation_array in segmentation_arrays]
+
+        # Convert the structure_voxel_count list to a NumPy array
+        structure_voxel_count = np.array(structure_voxel_count)
+
+        # Get the indices that would sort the structure_voxel_count array
+        sorted_indices = np.argsort(structure_voxel_count)[::-1]
+
+        # Use the sorted indices to reorder arrays
+        sorted_segmentation_matter_arrays = [segmentation_arrays[i] for i in sorted_indices]
+
+        # print the order of the structures
+        print("original order: ", list(legend.values()))
+        sorted_structure_names=np.array(list(legend.values()))[sorted_indices]
+        print("order sorted by voxel count (descending): ", sorted_structure_names)
+
+        # Use the sorted indices to reorder images
+        sorted_segmentation_images = [segmentation_images[i] for i in sorted_indices]
+
+        # Create a folder for the patient inside the output_folder
+        patient_folder = os.path.join(output_folder, patient)
+        os.makedirs(patient_folder, exist_ok=True)
+
+
+        # Subtract the overlap from the larger structure and add it to the smaller structure
+        new_sorted_segmentation_matter_array_images = []
+
+        for count, (array, image) in enumerate(
+                zip(sorted_segmentation_matter_arrays[:-1], sorted_segmentation_images[:-1])):
+            overlap_array = np.logical_and(array > 0, sorted_segmentation_matter_arrays[count + 1] > 0)
+
+            # Conditionally subtract overlap from the larger structure
+            # new_array = array - overlap_array
+            #new_array = array & ~overlap_array
+            #new_array = np.where(overlap_array, array & ~overlap_array, array)
+            new_array = np.where(overlap_array, 0, array)
+
+            # Conditionally add overlap to the smaller structure using logical_or
+            #sorted_segmentation_matter_arrays[count + 1] += overlap_array
+            #sorted_segmentation_matter_arrays[count + 1] &= ~overlap_array
+            #sorted_segmentation_matter_arrays[count + 1] |= overlap_array
+            sorted_segmentation_matter_arrays[count + 1] = np.where(overlap_array, 1,
+                                                                    sorted_segmentation_matter_arrays[count + 1])
+
+            new_image = sitk.GetImageFromArray(new_array)
+            new_image.CopyInformation(image)
+
+            new_sorted_segmentation_matter_array_images.append(new_image)
+
+            output_filename = os.path.join(patient_folder, f'_new_{sorted_structure_names[count]}.mha')
+            sitk.WriteImage(new_image, output_filename)
+
+        last_array = sorted_segmentation_matter_arrays[-1]
+        last_image = sitk.GetImageFromArray(last_array)
+        last_image.CopyInformation(sorted_segmentation_images[-1])
+
+        # Construct the output filename for the last image
+        last_output_filename = os.path.join(patient_folder, f'_new_{sorted_structure_names[-1]}.mha')
+
+        # Save the last image to the specified filename
+        sitk.WriteImage(last_image, last_output_filename)
+
+        # Append the last image to the list if needed
+        new_sorted_segmentation_matter_array_images.append(last_image)
+
+        # Calculate the overlap matrix
+        overlap_matrix = calculate_overlap_matrix(new_sorted_segmentation_matter_array_images)
+        print("Overlap Matrix - after substraction:")
+        for row in overlap_matrix:
+            print(row)
 
 
 
@@ -283,49 +238,5 @@ if __name__ == "__main__":
 
     script_dir = os.path.dirname(sys.argv[0])
 
-    parser = argparse.ArgumentParser(description='Medical image analysis pipeline for brain tissue segmentation')
-
-    parser.add_argument(
-        '--result_dir',
-        type=str,
-        default=os.path.normpath(os.path.join(script_dir, './mia-result')),
-        help='Directory for results.'
-    )
-
-    parser.add_argument(
-        '--data_atlas_dir',
-        type=str,
-        default=os.path.normpath(os.path.join(script_dir, '../data/atlas')),
-        help='Directory with atlas data.'
-    )
-
-    parser.add_argument(
-        '--data_train_dir',
-        type=str,
-        default=os.path.normpath(os.path.join(script_dir, '../data/train/')),
-        help='Directory with training data.'
-    )
-
-    parser.add_argument(
-        '--data_test_dir',
-        type=str,
-        default=os.path.normpath(os.path.join(script_dir, '../data/test/')),
-        help='Directory with testing data.'
-    )
-
-    parser.add_argument(
-        '--config_section',
-        type=str,
-        default="default",
-        help='Choose config file section.'
-    )
-
-    args = parser.parse_args()
-    main(
-            args.result_dir,
-            args.data_atlas_dir,
-            args.data_train_dir,
-            args.data_test_dir,
-            args.config_section
-        )
+    main()
 
