@@ -122,6 +122,125 @@ def rename_folders(input_folder, legend):
 
     return folder_paths
 
+def subtract_overlap(larger_structure, smaller_structure):
+    # Convert images to arrays
+    larger_array = sitk.GetArrayFromImage(larger_structure)
+    smaller_array = sitk.GetArrayFromImage(smaller_structure)
+
+    # Identify overlapping regions
+    overlap_array = np.logical_and(larger_array > 0, smaller_array > 0)
+
+    # Set overlapping parts to 0 in the larger structure
+    larger_array = np.where(overlap_array, 0, larger_array)
+
+    # Identify non-overlapping regions and keep them in the larger structure
+    larger_array = np.where(np.logical_not(overlap_array), larger_array, 0)
+
+    return sitk.GetImageFromArray(larger_array)
+
+def calculate_weighted_dice_scores(evaluator_results, images_prediction, runinfofile):
+    # get dice scores for all labels
+    label_mapping = {
+        0: 'Background',
+        1: 'WhiteMatter',
+        2: 'GreyMatter',
+        3: 'Hippocampus',
+        4: 'Amygdala',
+        5: 'Thalamus'
+    }
+    def get_dice_scores_for_all_labels(results):
+        unique_labels = set(
+            result.label for result in results if result.metric == 'DICE')
+        dice_scores_per_label = {}
+        for label in unique_labels:
+            dice_scores_per_label[label] = [result.value for result in results if
+                                            result.metric == 'DICE' and result.label == label]
+        return dice_scores_per_label
+
+
+    def get_voxel_count_per_label(img):
+        image_array = sitk.GetArrayFromImage(img)
+        unique_labels = np.unique(image_array)
+        # volume_per_label = []
+        volume_per_label = {}
+        for label in unique_labels:
+            # Extract the voxel indices for the current label
+            label_indices = np.where(image_array == label)
+
+            # Calculate the size of the label in each dimension
+            size_x = (np.max(label_indices[0]) - np.min(label_indices[0]) + 1)
+            size_y = (np.max(label_indices[1]) - np.min(label_indices[1]) + 1)
+            size_z = (np.max(label_indices[2]) - np.min(label_indices[2]) + 1)
+
+            volume = size_x * size_y * size_z
+            volume_per_label[label] = volume
+        return volume_per_label
+
+
+    def map_fields(init_dict, map_dict, res_dict=None):
+        res_dict = res_dict or {}
+        for k, v in init_dict.items():
+            if isinstance(v, dict):
+                v = map_fields(v, map_dict[k])
+            elif k in map_dict.keys():
+                k = str(map_dict[k])
+            res_dict[k] = v
+        return res_dict
+
+
+    def calculate_weighted_dice_score_per_label(dice_scores_per_label, volume_per_label):
+
+        background_label=volume_per_label["Background"]
+        del volume_per_label["Background"]  # remove background
+        if len(dice_scores_per_label) != len(volume_per_label):
+            volume_per_label = {label: volume_per_label[label] for label in dice_scores_per_label}
+
+        # Calculate the total voxel count
+        #total_voxel_count = sum(volume_per_label.values())
+        total_voxel_count = background_label
+
+        voxel_counts_ordered = {label: volume_per_label[label] for label in dice_scores_per_label}
+
+        weighted_dice_scores = {
+            label: (total_voxel_count - voxel_counts_ordered[label]) * dice_scores_per_label[label] / total_voxel_count
+            for label in dice_scores_per_label if dice_scores_per_label[label] != 0.0
+        }
+
+
+        return weighted_dice_scores
+
+
+    dice_scores_all_labels = get_dice_scores_for_all_labels(evaluator_results)
+
+    # Remove the second entry [1] from each list (for some reason I get double entries for each label)
+    dice_scores_all_labels = {label: score[0] for label, score in dice_scores_all_labels.items()}
+
+    #Get voxel count per label
+    volume_per_img = [map_fields(get_voxel_count_per_label(img),label_mapping) for img in images_prediction]
+
+    # Calculate the total voxel count per label
+    voxel_count_per_label = {}
+    for volume_dict in volume_per_img:
+        for label, volume in volume_dict.items():
+            if label not in voxel_count_per_label:
+                voxel_count_per_label[label] = []
+            voxel_count_per_label[label].append(volume)
+
+    # Calculate the mean voxel count per label
+    #fixme this one might be pointless
+    mean_voxel_count_per_label = {label: np.mean(volumes) for label, volumes in voxel_count_per_label.items()}
+    # fixme background same as total_voxels_avg???
+    #del mean_voxel_count_per_label["Background"]#remove background
+
+    weighted_dice_scores = calculate_weighted_dice_score_per_label(dice_scores_all_labels, mean_voxel_count_per_label)
+
+    print("Weighted Dice Scores per Label:")
+    for label, score in weighted_dice_scores.items():
+        print(f"Label {label}: {score}")
+    with open(runinfofile, 'a') as f:
+        f.write("\nWeighted Dice Scores:\n")
+        for label, score in weighted_dice_scores.items():
+            f.write(f"Label {label}: {score}\n")
 
 def main():
     """Overlapping calulation"""
@@ -161,8 +280,10 @@ def main():
         for segmentation_files_basename in segmentation_files_basenames
     ]
 
+
+    #################### Calculate substractions ####################
+    #patient_list = [patient_list[0]]  #shorten-up # TODO remove
     # Iterate through the patients
-    patient_list = [patient_list[0]]  # TODO remove
     for patient in patient_list:
         print("==patient==: ", patient)
 
@@ -177,6 +298,9 @@ def main():
             sitk.ReadImage(segmentation_file)
             for segmentation_file in segmentation_files
         ]
+
+        # Get a deepcopy of the segmentation images
+        segmentation_images_original = copy.deepcopy(segmentation_images)
 
         # Calculate the overlap matrix
         overlap_matrix = calculate_overlap_matrix(segmentation_images)
@@ -196,143 +320,150 @@ def main():
             for segmentation_array in segmentation_arrays
         ]
 
-        # Convert the structure_voxel_count list to a NumPy array
-        structure_voxel_count = np.array(structure_voxel_count)
-
-        # Get the indices that would sort the structure_voxel_count array
-        sorted_indices = np.argsort(structure_voxel_count)[::-1]
-
-        # Use the sorted indices to reorder arrays
-        sorted_segmentation_matter_arrays = [
-            segmentation_arrays[i] for i in sorted_indices
-        ]
-
-        # print the order of the structures
-        print("original order: ", list(legend.values()))
-        sorted_structure_names = np.array(list(legend.values()))[sorted_indices]
-        print("order sorted by voxel count (descending): ", sorted_structure_names)
-
-        # Use the sorted indices to reorder images
-        sorted_segmentation_images = [segmentation_images[i] for i in sorted_indices]
-
         # Create a folder for the patient inside the output_folder
         patient_folder = os.path.join(output_folder, patient)
         os.makedirs(patient_folder, exist_ok=True)
 
-        # Subtract the overlap from the larger structure and add it to the smaller structure
-        new_sorted_segmentation_matter_array_images = []
+        #1) white 2) gray 3) thalamus 4) amygdala 5) hyppocampus
+        #definition shorthand #check if order always correct todo
+        white_matter = segmentation_images_original[0]
+        gray_matter = segmentation_images_original[1]
+        thalamus = segmentation_images_original[2]
+        amygdala = segmentation_images_original[3]
+        hippocampus = segmentation_images_original[4]
 
-        for count, (array, image) in enumerate(
-            zip(sorted_segmentation_matter_arrays[:-1], sorted_segmentation_images[:-1])
-        ):
-            original_array = copy.deepcopy(
-                array
-            )  # in case overlap is over more than 2 structures, always compare to original array
-            # need to go over this loop for all smaller structures, not only next smaller structure.
-            # save all overlaps for testing
-            overall_overlap_array = []
-            for i in reversed(
-                range(count, len(sorted_segmentation_matter_arrays))
-            ):  # reverse it to start with smaller structures and give the overlap to them (if more than 2 structures overlap)
-                if i == count:
-                    continue
-                overlap_array = np.logical_and(
-                    original_array > 0, sorted_segmentation_matter_arrays[i] > 0
-                )
+        #substract overlap
+        white_matter = subtract_overlap(white_matter, gray_matter)
+        white_matter = subtract_overlap(white_matter, thalamus)
+        white_matter = subtract_overlap(white_matter, hippocampus)
+        white_matter = subtract_overlap(white_matter, amygdala)
 
-                overall_overlap_array.append(overlap_array)
+        gray_matter = subtract_overlap(gray_matter, thalamus)
+        gray_matter = subtract_overlap(gray_matter, hippocampus)
+        gray_matter = subtract_overlap(gray_matter, amygdala)
 
-                # Conditionally subtract overlap from the larger structure
-                new_array = np.where(
-                    overlap_array, 0, array
-                )  # set overlapping parts to 0
+        thalamus = subtract_overlap(thalamus, hippocampus)
+        thalamus = subtract_overlap(thalamus, amygdala)
 
-                i_array = sorted_segmentation_matter_arrays[i][overlap_array]
-                print(f"overlapping labels in {i}:{np.unique(i_array)}")
+        amygdala = subtract_overlap(amygdala, hippocampus)
 
-                overlap_test = (new_array != array).sum()
-                print(f"overlap_test: {overlap_test} voxels")
-
-                # print nb of voxels in overlap
-                print(f"overlap_array: {overlap_array.sum()} voxels")
-                print(
-                    f"overlap_array between {count} and {i}: {np.unique(overlap_array)} voxels"
-                )
-                # print unique values of new array
-                print(f"new_array unique: {np.unique(new_array)} ")
-
-                # subtract overlap from larger structure if it already belongs to a smaller structure
-                overlap_current = overall_overlap_array[-1]
-
-                for j in range(len(overall_overlap_array[:-1])):
-                    overlap_temp = np.logical_and(
-                        overall_overlap_array[j], overlap_current
-                    )
-                    print(
-                        f"overlap_temp between current {i} and {4-j}: {overlap_temp.sum()} voxels"
-                    )
-                    sorted_segmentation_matter_arrays[i] = np.where(
-                        overlap_temp,
-                        0,
-                        sorted_segmentation_matter_arrays[i],
-                    )
-
-                # add overlap to smaller structure? this should no be necessary, as the overlap is already in the smaller structure and I delete it from bigger structure. so small still has it.
-                # however: in reality, the overlap just disappears instead of being kept by the smaller structure...
-
-                array = new_array
-
-            # compare all overlaps and print number of same voxels
-            for i in range(len(overall_overlap_array)):
-                for j in range(i + 1, len(overall_overlap_array)):
-                    print(
-                        f"overlap {i} and {j}: {np.logical_and(overall_overlap_array[i], overall_overlap_array[j]).sum()} voxels"
-                    )
-
-            new_image = sitk.GetImageFromArray(new_array)
-            new_image.CopyInformation(image)
-
-            new_sorted_segmentation_matter_array_images.append(new_image)
-
-            output_filename = os.path.join(
-                patient_folder, f"_new_{sorted_structure_names[count]}.mha"
-            )
-            sitk.WriteImage(new_image, output_filename)
-            # Calculate the overlap matrix
-            temp = new_sorted_segmentation_matter_array_images.copy()
-            for i in range(count + 1, len(sorted_segmentation_matter_arrays)):
-                image = sitk.GetImageFromArray(sorted_segmentation_matter_arrays[i])
-                temp.append(image)
-            print(len(sorted_segmentation_images[count + 1 :]))
-            print(len(temp))
-            overlap_matrix_intermediate = calculate_overlap_matrix(temp)
-            print(f"Overlap Matrix intermediate - after substraction {count}:")
-            for row in overlap_matrix_intermediate:
-                print(row)
-
-        last_array = sorted_segmentation_matter_arrays[-1]
-        last_image = sitk.GetImageFromArray(last_array)
-        last_image.CopyInformation(sorted_segmentation_images[-1])
-
-        # Construct the output filename for the last image
-        last_output_filename = os.path.join(
-            patient_folder, f"_new_{sorted_structure_names[-1]}.mha"
-        )
-
-        # Save the last image to the specified filename
-        sitk.WriteImage(last_image, last_output_filename)
-
-        # Append the last image to the list if needed
-        new_sorted_segmentation_matter_array_images.append(last_image)
-
-        # Calculate the overlap matrix
-        overlap_matrix = calculate_overlap_matrix(
-            new_sorted_segmentation_matter_array_images
-        )
+        # Calculate the overlap matrix - after substraction
+        segmentation_images = [white_matter, gray_matter, thalamus, hippocampus, amygdala]
+        overlap_matrix = calculate_overlap_matrix(segmentation_images)
         print("Overlap Matrix - after substraction:")
         for row in overlap_matrix:
             print(row)
 
+        # Copy information from original images
+        white_matter.CopyInformation(segmentation_images_original[0])
+        gray_matter.CopyInformation(segmentation_images_original[1])
+        thalamus.CopyInformation(segmentation_images_original[2])
+        hippocampus.CopyInformation(segmentation_images_original[3])
+        amygdala.CopyInformation(segmentation_images_original[4])
+
+        # Save the images
+        sitk.WriteImage(white_matter, os.path.join(patient_folder, f'_new_white_matter.mha'))
+        sitk.WriteImage(gray_matter, os.path.join(patient_folder, f'_new_gray_matter.mha'))
+        sitk.WriteImage(thalamus, os.path.join(patient_folder, f'_new_thalamus.mha'))
+        sitk.WriteImage(hippocampus, os.path.join(patient_folder, f'_new_hippocampus.mha'))
+        sitk.WriteImage(amygdala, os.path.join(patient_folder, f'_new_amygdala.mha'))
+
+
+    ##################### Calculate dice scores ####################
+    import mialab.utilities.pipeline_utilities as putil
+    data_atlas_dir = os.path.normpath(os.path.join(script_dir, '../data/atlas'))
+    putil.load_atlas_images(data_atlas_dir)
+    LOADING_KEYS = [structure.BrainImageTypes.T1w,
+                    structure.BrainImageTypes.T2w,
+                    structure.BrainImageTypes.GroundTruth,
+                    structure.BrainImageTypes.BrainMask,
+                    structure.BrainImageTypes.RegistrationTransform]
+    import mialab.utilities.file_access_utilities as futil
+    data_test_dir = os.path.normpath(os.path.join(script_dir, '../data/test/'))
+    crawler = futil.FileSystemDataCrawler(data_test_dir,
+                                          LOADING_KEYS,
+                                          futil.BrainImageFilePathGenerator(),
+                                          futil.DataDirectoryFilter())
+    pre_process_params = {'skullstrip_pre': True,
+                          'normalization_pre': True,
+                          'registration_pre': True,
+                          'coordinates_feature': True,
+                          'intensity_feature': True,
+                          'gradient_intensity_feature': True}
+
+    #patient_list = [patient_list[0]]  # TODO remove
+    for patient in patient_list:
+        print("patient: ",patient)
+
+        # Get the segmentation files for the current patient
+        segmentation_files = [
+            os.path.join(label_folder, f"{patient}_seg.mha")
+            for label_folder in folder_paths
+        ]
+        # Define the order of structures
+        desired_order = ['white_matter', 'grey_matter', 'hippocampus', 'amygdala', 'thalamus']
+        #fixme must be in same order as labels!!!
+
+        # Define a custom sorting key function
+        def custom_sort_key(file_path):
+            for index, structure_name in enumerate(desired_order, start=1):
+                if structure_name in file_path:
+                    return index
+            # If the structure name is not found in desired_order, return a high value
+            return len(desired_order) + 1
+
+        # Sort the segmentation files based on the custom key
+        sorted_segmentation_files = sorted(segmentation_files, key=custom_sort_key)
+
+        # Load the segmentation images
+        segmentation_images = [
+            sitk.ReadImage(segmentation_file)
+            for segmentation_file in sorted_segmentation_files
+        ]
+
+        # loop through the binary labels
+        for binary_label, segmentation_image  in enumerate(segmentation_images, start=1):
+            print("binary_label",binary_label)
+            print("init preprocess with bin label")
+            data = copy.deepcopy(crawler.data)  # deepcopy to prevent overwriting trough pre_process_batch
+            images_test = putil.pre_process_batch(data, pre_process_params, multi_process=False, label=binary_label)
+            for img in images_test:
+                evaluator = putil.init_evaluator(binary_label)  # todo white matter
+                image_prediction=segmentation_image
+                evaluator.evaluate(image_prediction, img.images[structure.BrainImageTypes.GroundTruth], img.id_)
+
+            patient_folder = os.path.join(output_folder, patient)
+            result_dir = patient_folder
+            print('\nSubject-wise results...')
+            result_file = os.path.join(result_dir, f'results_{binary_label}.csv')
+
+            import pymia.evaluation.writer as writer
+
+            print('\nSubject-wise results...')
+            writer.ConsoleWriter(use_logging=True).write(evaluator.results)
+
+            # report also mean and standard deviation among all subjects
+            result_summary_file = os.path.join(result_dir, 'results_summary.csv')
+            functions = {'MEAN': np.mean, 'STD': np.std}
+            writer.CSVStatisticsWriter(result_summary_file, functions=functions).write(evaluator.results)
+            print('\nAggregated statistic results...')
+            writer.ConsoleStatisticsWriter(functions=functions).write(evaluator.results)
+
+            WEIGHTED_DICE = True
+            images_prediction = []
+            images_prediction.append(image_prediction)
+
+            # # write run info file
+            runinfofile = os.path.join(result_dir, 'RunInfo.txt')
+            with open(runinfofile, 'a') as f:
+                f.write("General info:\n")
+                f.write("label: " + str(binary_label) + "\n")
+
+            if WEIGHTED_DICE:
+                calculate_weighted_dice_scores(evaluator.results, images_prediction, runinfofile)
+
+            # clear results such that the evaluator is ready for the next evaluation
+            evaluator.clear()
 
 if __name__ == "__main__":
     """The program's entry point."""
