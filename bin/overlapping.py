@@ -202,7 +202,7 @@ def calculate_weighted_dice_scores(evaluator_results, images_prediction, runinfo
         voxel_counts_ordered = {label: volume_per_label[label] for label in dice_scores_per_label}
 
         weighted_dice_scores = {
-            label: (total_voxel_count - voxel_counts_ordered[label]) * dice_scores_per_label[label] / total_voxel_count
+            label: (total_voxel_count - voxel_counts_ordered[label])  / total_voxel_count * dice_scores_per_label[label]
             for label in dice_scores_per_label if dice_scores_per_label[label] != 0.0
         }
 
@@ -284,6 +284,7 @@ def main():
     #################### Calculate substractions ####################
     #patient_list = [patient_list[0]]  #shorten-up # TODO remove
     # Iterate through the patients
+    #patient_list = patient_list[4:]
     for patient in patient_list:
         print("==patient==: ", patient)
 
@@ -422,28 +423,32 @@ def main():
         ]
 
         # loop through the binary labels
-        for binary_label, segmentation_image  in enumerate(segmentation_images, start=1):
+        for binary_label, segmentation_image in enumerate(segmentation_images, start=1):
             print("binary_label",binary_label)
             print("init preprocess with bin label")
             data = copy.deepcopy(crawler.data)  # deepcopy to prevent overwriting trough pre_process_batch
             images_test = putil.pre_process_batch(data, pre_process_params, multi_process=False, label=binary_label)
+            evaluator = putil.init_evaluator(binary_label)  # todo white matter
+
             for img in images_test:
-                evaluator = putil.init_evaluator(binary_label)  # todo white matter
                 image_prediction=segmentation_image
                 evaluator.evaluate(image_prediction, img.images[structure.BrainImageTypes.GroundTruth], img.id_)
 
-            patient_folder = os.path.join(output_folder, patient)
-            result_dir = patient_folder
+            binary_folder = os.path.join(output_folder, f'{binary_label}')
+            result_dir = binary_folder
             print('\nSubject-wise results...')
-            result_file = os.path.join(result_dir, f'results_{binary_label}.csv')
-
+            os.makedirs(result_dir, exist_ok=True)
+            result_file = os.path.join(result_dir, f'results_{binary_label}_{patient}.csv')
             import pymia.evaluation.writer as writer
+            writer.CSVWriter(result_file).write(evaluator.results)
+
+
 
             print('\nSubject-wise results...')
             writer.ConsoleWriter(use_logging=True).write(evaluator.results)
 
             # report also mean and standard deviation among all subjects
-            result_summary_file = os.path.join(result_dir, 'results_summary.csv')
+            result_summary_file = os.path.join(result_dir, f'results_summary_{binary_label}_{patient}.csv')
             functions = {'MEAN': np.mean, 'STD': np.std}
             writer.CSVStatisticsWriter(result_summary_file, functions=functions).write(evaluator.results)
             print('\nAggregated statistic results...')
@@ -454,7 +459,7 @@ def main():
             images_prediction.append(image_prediction)
 
             # # write run info file
-            runinfofile = os.path.join(result_dir, 'RunInfo.txt')
+            runinfofile = os.path.join(result_dir, f'RunInfo_{binary_label}_{patient}.txt')
             with open(runinfofile, 'a') as f:
                 f.write("General info:\n")
                 f.write("label: " + str(binary_label) + "\n")
